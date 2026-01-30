@@ -82,13 +82,23 @@ class AntiSpoofPredictor:
         img_cropped = self.image_cropper.crop(img, bbox_wh, self.scale, 80, 80)
         
         if self.use_coreml:
-            # Return PIL image for Core ML
-            # Core ML expects a PIL Image (RGB by default semantics).
-            # We convert BGR -> RGB here so PIL is correct.
-            # If the model expects BGR (set in export color_layout), Core ML will swap it back.
-            img_cropped_rgb = cv2.cvtColor(img_cropped, cv2.COLOR_BGR2RGB)
-            from PIL import Image
-            return Image.fromarray(img_cropped_rgb)
+            # STRATEGY 3: Raw Tensor Input.
+            # We don't return a PIL Image. We return the preprocessed Numpy Tensor directly.
+            # img_cropped is BGR (H, W, C)
+            
+            # 1. Resize if needed (cropper does resize, so 80x80 already)
+            # 2. Normalize: The src/data_io/functional.py DOES NOT DIVIDE BY 255.
+            # It returns float tensor in [0, 255].
+            # So we keep it as float [0, 255].
+            img_float = img_cropped.astype(np.float32)
+            
+            # 3. Transpose to (C, H, W) -> (3, 80, 80)
+            img_chw = img_float.transpose(2, 0, 1)
+            
+            # 4. Add Batch Dim -> (1, 3, 80, 80)
+            img_batch = np.expand_dims(img_chw, axis=0)
+            
+            return img_batch # Return numpy array
 
         # Transform
         img_tensor = self.test_transform(img_cropped)
@@ -171,9 +181,9 @@ class AntiSpoofPredictor:
         
         model = ct.convert(
             traced_model,
-            # Model expects BGR (because PyTorch model trains/infers on BGR).
-            # color_layout="BGR" tells CoreML: "The input tensor R,G,B should be populated from the B,G,R channels of the source image."
-            inputs=[ct.ImageType(name="input_1", shape=dummy_input.shape, scale=1/255.0, color_layout="BGR")],
+            # STRATEGY 3: TensorType
+            # removing scale/color_layout. We assume input is already valid float tensor.
+            inputs=[ct.TensorType(name="input_1", shape=dummy_input.shape)],
             compute_precision=ct.precision.FLOAT32,
             # classifier_config=classifier_config, # Optional, if we want strict classification
         )
@@ -187,15 +197,10 @@ class AntiSpoofPredictor:
         self.coreml_model = ct.models.MLModel(model_path)
         self.use_coreml = True
 
-    def predict_coreml(self, img_pil):
-        # img_pil should be a PIL Image (RGB)
-        # The model expects "input_1" as ImageType
+    def predict_coreml(self, img_np):
+        # img_np is (1, 3, 80, 80) numpy array (BGR order)
         try:
-            # Resize to expected input size if needed, though Core ML might handle it if flexible
-            # But our model expects 80x80 fixed usually unless flexible
-            img_resized = img_pil.resize(self.input_size)
-            
-            prediction = self.coreml_model.predict({'input_1': img_resized})
+            prediction = self.coreml_model.predict({'input_1': img_np})
             
             # The output name depends on the model. Usually 'var_xxx' or user text.
             # We need to inspect the model or assume standard output.
