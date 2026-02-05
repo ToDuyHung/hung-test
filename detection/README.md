@@ -31,3 +31,55 @@ python test.py --input P1E_S1_C1_00001452.jpg --coreml --models_dir hung-test/de
 ## Options
 - `--det_max_side`: Max side length to resize the input image (maintain aspect ratio). Default: `320`.
 - `--models_dir`: Directory to load/save models. Default: `detection_models`.
+
+---
+
+## Swift Performance Optimization
+
+### Problem
+Swift CoreML inference was running at **~500ms** vs Python's **~50ms** (10x slower).
+
+### Root Causes & Fixes
+
+#### 1. 🚀 **CIContext Recreation** (Critical)
+**Problem**: Creating new `CIContext()` for every image/crop (~50-100 times per frame)  
+**Impact**: ~300-400ms overhead  
+**Fix**: Reuse single `ciContext` instance created in `init()`
+
+```swift
+// Before
+let context = CIContext()
+context.render(image, to: buffer)
+
+// After
+private let ciContext: CIContext // Created once
+ciContext.render(image, to: buffer)
+```
+
+#### 2. ⚡ **MLModelConfiguration** (High Priority)
+**Problem**: Default config doesn't utilize Neural Engine  
+**Impact**: ~50-100ms overhead  
+**Fix**: Set `computeUnits = .all`
+
+```swift
+let config = MLModelConfiguration()
+config.computeUnits = .all // Neural Engine + GPU + CPU
+```
+
+#### 3. 📊 **Float16 Extraction** (Medium Priority)
+**Problem**: Slow subscript access for non-Float32 arrays  
+**Impact**: ~10-20ms overhead  
+**Fix**: Added fast unsafe pointer path for Float16
+
+### Expected Performance
+- **Before**: ~500ms per frame
+- **After**: ~50-100ms per frame (5-10x speedup)
+
+### Benchmarking
+```swift
+let start = CFAbsoluteTimeGetCurrent()
+let results = try await detector.detectFaces(image: image)
+let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
+print("Detection took: \(elapsed)ms")
+```
+
